@@ -699,7 +699,7 @@ def find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms):
     return results_df
 
 # Interface utilisateur
-st.title("Analyseur de modifications moleculaires par scaffold invariant")
+st.title("Recherche Analogues Ciblés ")
 
 # Upload du fichier
 uploaded_file = st.file_uploader("Charger le fichier CSV/TSV de molecules", type=["csv", "tsv"])
