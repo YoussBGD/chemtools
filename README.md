@@ -1,6 +1,6 @@
 # Readme: Outils d'Analyse Moléculaire
 
-Ce dépôt contient deux outils complémentaires pour l'analyse et la comparaison de structures moléculaires. Ces applications web, développées avec Streamlit et RDKit, permettent d'explorer et d'analyser des ensembles de molécules de façon interactive.
+Ce dépôt contient deux outils complémentaires pour l'analyse et la comparaison de structures moléculaires. Ces applications web, développées avec Streamlit et RDKit, permettent d'explorer et visualiser des ensembles de molécules de façon interactive.
 
 ## Description des outils
 
