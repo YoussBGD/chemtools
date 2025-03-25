@@ -8,12 +8,13 @@ from PIL import Image
 import io
 import base64
 
-st.set_page_config(page_title="Recherche analogues ciblés", layout="wide")
+st.set_page_config(page_title="Recherche Analogues", layout="wide")
 
 # Configuration pour maintenir l'état entre les actions
 if 'initialized' not in st.session_state:
     st.session_state.initialized = True
     st.session_state.all_results = pd.DataFrame()
+    st.session_state.selected_fragment_names = []
 
 def sanitize_mol(mol):
     """Effectue une sanitization des molécules et initialise les infos de ring"""
@@ -106,6 +107,21 @@ def generate_molecule_image(mol, size=(400, 300), highlightAtoms=None, molName="
         st.error(f"Erreur lors de la generation de l'image: {str(e)}")
         return None
 
+def get_canonical_atom_description(mol, atom_indices):
+    """Génère une description canonique des atomes pour éviter les doublons"""
+    # Créer une liste de tuples (symbole, indice)
+    atom_tuples = []
+    for idx in atom_indices:
+        atom = mol.GetAtomWithIdx(idx)
+        atom_tuples.append((atom.GetSymbol(), idx+1))
+    
+    # Trier d'abord par symbole atomique, puis par indice
+    atom_tuples.sort()
+    
+    # Convertir en description textuelle
+    atom_symbols = [f"{symbol}{idx}" for symbol, idx in atom_tuples]
+    return ", ".join(atom_symbols)
+
 def identify_cycles(mol):
     """Identifie les cycles dans une molecule et retourne un dictionnaire des atomes par cycle"""
     if mol is None:
@@ -177,6 +193,7 @@ def identify_functional_groups(mol):
             continue  # Ignorer les erreurs spécifiques à certains motifs
     
     return group_atoms
+
 def identify_atom_specific_fragments(mol):
     """Identifie des fragments dans la molecule basés sur des caractéristiques structurelles"""
     if mol is None:
@@ -185,11 +202,17 @@ def identify_atom_specific_fragments(mol):
     # S'assurer que la molécule est sanitizée
     mol = sanitize_mol(mol)
     
+    # Utiliser un dictionnaire pour les fragments canoniques
+    # La clé sera un tuple trié des atomes pour garantir l'unicité
+    canonical_fragments = {}
     fragments = {}
     
     # 1. Identifier les cycles
     cycles = identify_cycles(mol)
-    fragments.update(cycles)
+    for name, atoms in cycles.items():
+        # Créer une clé canonique (tuple trié des atomes)
+        canonical_key = tuple(sorted(atoms))
+        canonical_fragments[canonical_key] = (name, atoms)
     
     # Créer un ensemble de tous les atomes de cycle pour référence rapide
     cycle_atoms_flat = []
@@ -210,9 +233,6 @@ def identify_atom_specific_fragments(mol):
     func_groups = identify_functional_groups(mol)
     
     # Pour chaque groupe fonctionnel, vérifier sa position par rapport aux cycles
-    # et créer un nouveau nom qui inclut cette information
-    func_groups_positioned = {}
-    
     for group_name, atoms in func_groups.items():
         # Trouver les points de connexion aux cycles
         connection_to_cycle = False
@@ -236,10 +256,13 @@ def identify_atom_specific_fragments(mol):
         
         # Ajouter l'information de position au nom du groupe
         new_group_name = f"{group_name}{cycle_connection_info}"
-        func_groups_positioned[new_group_name] = atoms
-    
-    # Ajouter les groupes fonctionnels avec informations de position
-    fragments.update(func_groups_positioned)
+        
+        # Créer une clé canonique pour ce groupe
+        canonical_key = tuple(sorted(atoms))
+        
+        # Vérifier si nous avons déjà un fragment avec ces mêmes atomes
+        if canonical_key not in canonical_fragments:
+            canonical_fragments[canonical_key] = (new_group_name, atoms)
     
     # 3. Identifier les substituants (chaînes latérales)
     # Trouver les atomes de connexion (atomes cycliques avec voisins non cycliques)
@@ -275,7 +298,7 @@ def identify_atom_specific_fragments(mol):
             if start_idx in processed:
                 continue
             
-            # Créer une clé canonique pour cette connexion (toujours ordonner les indices)
+            # Créer une clé canonique pour cette connexion
             connection_key = tuple(sorted([atom_idx, start_idx]))
             
             # Vérifier si cette connexion a déjà été traitée
@@ -300,12 +323,20 @@ def identify_atom_specific_fragments(mol):
                         processed.add(n_idx)
                         to_process.append(n_idx)
             
-            # Ajouter la chaîne trouvée sans inclure l'atome du cycle dans la liste des atomes
-            fragments[f"Chaine {substituent_idx}{position_info}"] = chain_atoms
-            substituent_idx += 1
+            # Créer une clé canonique pour cette chaîne
+            canonical_key = tuple(sorted(chain_atoms))
+            
+            # Vérifier si nous avons déjà un fragment avec ces mêmes atomes
+            if canonical_key not in canonical_fragments:
+                chain_name = f"Chaine {substituent_idx}{position_info}"
+                canonical_fragments[canonical_key] = (chain_name, chain_atoms)
+                substituent_idx += 1
+    
+    # Construire le dictionnaire final des fragments à partir des fragments canoniques
+    for i, (_, (name, atoms)) in enumerate(canonical_fragments.items()):
+        fragments[name] = atoms
     
     return fragments
-
 
 def extract_scaffold(mol, modification_atoms):
     """
@@ -545,7 +576,7 @@ def compare_scaffolds(ref_scaffold, test_mol):
     
     return False, [], "Aucune correspondance chimique valide trouvée"
 
-def find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms):
+def find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms, ref_id):
     """
     Trouve les analogues en s'assurant que la partie non sélectionnée
     est chimiquement identique (scaffold invariant) et ne contient pas
@@ -598,7 +629,7 @@ def find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms):
         original_row = df.iloc[i].to_dict()
         
         # Ignorer la molécule de référence
-        if mol_id == "Molport-001-492-296":
+        if mol_id == ref_id:
             continue
         
         # Créer la molécule test
@@ -736,7 +767,29 @@ def find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms):
     return results_df
 
 # Interface utilisateur
-st.title("Recherche analogues ciblés")
+st.title("Recherche Analogues")
+
+# Zone pour sélectionner la molécule de référence
+st.header("Sélection de la molécule de référence")
+
+# Option par défaut pour I0
+default_ref_id = "Molport-001-492-296"
+use_default = st.checkbox("Utiliser I0 comme molécule de référence", value=True)
+
+ref_id = default_ref_id
+ref_smiles = ""
+
+if not use_default:
+    # Permettre à l'utilisateur de spécifier une référence personnalisée
+    ref_input_type = st.radio(
+        "Spécifier la molécule de référence par:",
+        ["ID", "SMILES"], horizontal=True
+    )
+    
+    if ref_input_type == "ID":
+        ref_id = st.text_input("ID de la molécule de référence:", key="custom_ref_id")
+    else:
+        ref_smiles = st.text_input("SMILES de la molécule de référence:", key="custom_ref_smiles")
 
 # Upload du fichier
 uploaded_file = st.file_uploader("Charger le fichier CSV/TSV de molecules", type=["csv", "tsv"])
@@ -756,267 +809,276 @@ if uploaded_file is not None:
         else:
             st.success(f"Fichier charge avec succes! {len(df)} molecules trouvees.")
             
-            # Trouver la molecule I0
-            i0_id = "Molport-001-492-296"
-            i0_data = df[df['ID'] == i0_id]
-            
-            if len(i0_data) == 0:
-                # Option pour entrer manuellement le SMILES de I0
-                i0_smiles = st.text_input("La molecule I0 n'a pas ete trouvee. Entrez manuellement son SMILES:", 
-                                         key="i0_smiles_input")
-                if i0_smiles:
-                    i0_mol = mol_from_smiles(i0_smiles)
-                    if i0_mol:
-                        st.success("Molecule I0 definie manuellement.")
-                    else:
-                        st.error("SMILES invalide pour I0.")
-                        i0_mol = None
+            # Trouver la molecule de référence
+            if use_default:
+                # Chercher I0 dans le fichier
+                ref_data = df[df['ID'] == ref_id]
+                if len(ref_data) == 0:
+                    st.warning(f"La molécule I0 ({ref_id}) n'a pas été trouvée dans le fichier.")
+                    use_custom_smiles = st.checkbox("Entrer manuellement le SMILES de I0")
+                    if use_custom_smiles:
+                        ref_smiles = st.text_input("SMILES de I0:", key="i0_smiles_input")
                 else:
-                    i0_mol = None
+                    st.success(f"Molécule de référence I0 trouvée: {ref_id}")
+                    ref_smiles = ref_data['SMILES'].values[0]
             else:
-                st.success(f"Molecule de reference I0 trouvee: {i0_id}")
-                i0_smiles = i0_data['SMILES'].values[0]
-                i0_mol = mol_from_smiles(i0_smiles)
-            
-            if i0_mol:
-                # Afficher I0
-                st.subheader("Molecule de reference I0")
-                i0_img = generate_molecule_image(i0_mol, (600, 400), molName=f"I0: {i0_id}")
-                if i0_img:
-                    st.image(i0_img, caption=f"I0: {i0_smiles}")
-                
-                # Extraire les fragments avec identification précise
-                st.subheader("Fragments de la molecule I0")
-                fragments = identify_atom_specific_fragments(i0_mol)
-                
-                # Stocker les fragments dans la session state
-                if 'fragments' not in st.session_state:
-                    st.session_state.fragments = fragments
-                
-                # Visualisation des fragments disponibles
-                st.write("### Selectionnez les fragments a MODIFIER")
-                st.warning("Attention: Sélectionnez uniquement les fragments que vous souhaitez voir varier. Les parties non sélectionnées resteront identiques.")
-                
-                # Mise en page en grille
-                col_count = min(3, len(fragments))
-                
-                # Liste pour stocker les fragments sélectionnés
-                if 'selected_fragment_names' not in st.session_state:
-                    st.session_state.selected_fragment_names = []
-                
-                # Pour chaque fragment, créer une rangée avec l'image et la case à cocher
-                fragment_rows = []
-                for i in range(0, len(fragments), col_count):
-                    fragment_rows.append(list(fragments.keys())[i:i+col_count])
-                
-                for row in fragment_rows:
-                    cols = st.columns(col_count)
-                    for i, fragment_name in enumerate(row):
-                        if i < len(row):  # Vérifier que l'index est valide
-                            atom_indices = fragments[fragment_name]
-                            with cols[i]:
-                                # Générer l'image du fragment surligné
-                                fragment_img = generate_molecule_image(
-                                    i0_mol, 
-                                    (250, 200), 
-                                    highlightAtoms=atom_indices, 
-                                    molName=fragment_name
-                                )
-                                
-                                if fragment_img:
-                                    st.image(fragment_img)
-                                
-                                # Ajouter des informations sur les atomes impliqués
-                                atom_symbols = []
-                                for idx in atom_indices:
-                                    atom = i0_mol.GetAtomWithIdx(idx)
-                                    atom_symbols.append(f"{atom.GetSymbol()}{idx+1}")
-                                atom_info = ", ".join(atom_symbols)
-                                st.write(f"Atomes: {atom_info}")
-                                
-                                # Case à cocher pour sélectionner ce fragment
-                                fragment_selected = st.checkbox(
-                                    fragment_name, 
-                                    value=fragment_name in st.session_state.selected_fragment_names,
-                                    key=f"checkbox_{fragment_name}"
-                                )
-                                
-                                # Mettre à jour la liste des fragments sélectionnés
-                                if fragment_selected and fragment_name not in st.session_state.selected_fragment_names:
-                                    st.session_state.selected_fragment_names.append(fragment_name)
-                                elif not fragment_selected and fragment_name in st.session_state.selected_fragment_names:
-                                    st.session_state.selected_fragment_names.remove(fragment_name)
-                
-                # Afficher les fragments sélectionnés combinés
-                if st.session_state.selected_fragment_names:
-                    st.subheader("Zones de modification selectionnees")
-                    
-                    # Récupérer les indices des atomes pour tous les fragments sélectionnés
-                    modification_atoms = []
-                    
-                    for frag_name in st.session_state.selected_fragment_names:
-                        if frag_name in fragments:
-                            frag_atoms = fragments[frag_name]
-                            modification_atoms.extend(frag_atoms)
-                    
-                    # Éliminer les doublons
-                    modification_atoms = list(set(modification_atoms))
-                    
-                    # Stocker les atomes de modification dans la session state
-                    st.session_state.modification_atoms = modification_atoms
-                    
-                    # Créer une visualisation des fragments sélectionnés combinés
-                    combined_img = generate_molecule_image(
-                        i0_mol, 
-                        (600, 400), 
-                        highlightAtoms=modification_atoms, 
-                        molName="Zones de modifications autorisees"
-                    )
-                    
-                    if combined_img:
-                        st.image(combined_img)
-                        
-                    st.write(f"Fragments selectionnes: {', '.join(st.session_state.selected_fragment_names)}")
-                    
-                    # Créer et afficher le scaffold (ce qui ne changera pas)
-                    scaffold_mol, exit_points = extract_scaffold(i0_mol, modification_atoms)
-                    if scaffold_mol:
-                        # Stocker le scaffold dans la session state
-                        st.session_state.scaffold_mol = scaffold_mol
-                        st.session_state.scaffold_exit_points = exit_points
-                        
-                        st.subheader("Partie invariante (scaffold)")
-                        scaffold_img = generate_molecule_image(
-                            scaffold_mol, 
-                            (600, 400), 
-                            highlightAtoms=exit_points,
-                            molName="Scaffold (partie qui restera identique)"
-                        )
-                        if scaffold_img:
-                            st.image(scaffold_img)
-                            scaffold_atom_count = scaffold_mol.GetNumAtoms()
-                            scaffold_smiles = Chem.MolToSmiles(scaffold_mol)
-                            st.info(f"Les points de connexion aux zones de modification sont surlignés en rouge. Le scaffold contient {scaffold_atom_count} atomes.")
-                            st.text(f"SMILES du scaffold: {scaffold_smiles}")
-                else:
-                    st.info("Selectionnez au moins un fragment a modifier pour commencer l'analyse")
-                
-                # Bouton pour rechercher les analogues avec modifications spécifiques
-                if st.session_state.selected_fragment_names:
-                    search_button = st.button(
-                        "Rechercher les analogues", 
-                        key="search_analogs_button"
-                    )
-                    
-                    if search_button:
-                        # Récupérer les atomes à modifier
-                        modification_atoms = st.session_state.modification_atoms
-                        
-                        st.info(f"Recherche d'analogues où la partie invariante ({i0_mol.GetNumAtoms() - len(modification_atoms)} atomes) reste chimiquement identique...")
-                        
-                        results = find_analogs_by_fixed_scaffold(df, i0_mol, modification_atoms)
-                        
-                        # Stocker les résultats dans la session state
-                        st.session_state.results = results
-                
-                # Si des résultats existent dans la session, les afficher
-                if 'results' in st.session_state and not st.session_state.results.empty:
-                    results = st.session_state.results
-                    st.success(f"Trouvé {len(results)} analogues avec des modifications uniquement dans les zones sélectionnées")
-                    
-                    # Créer un DataFrame pour l'affichage avec des cases à cocher
-                    display_df = results[['ID', 'SMILES', 'Similarite']].copy()
-                    # Ajouter une colonne de sélection
-                    display_df['Selectionner'] = True
-                    # Convertir la similarité en pourcentage pour une meilleure lisibilité
-                    display_df['Similarite'] = display_df['Similarite'].apply(lambda x: f"{x*100:.1f}%")
-                    
-                    # Afficher le dataframe avec la possibilité de sélectionner des lignes
-                    st.subheader("Analogues identifiés")
-                    st.write("Cochez les molécules que vous souhaitez inclure dans le CSV final")
-                    
-                    # Utiliser st.data_editor pour créer un dataframe modifiable avec cases à cocher
-                    edited_df = st.data_editor(
-                        display_df,
-                        column_config={
-                            "Selectionner": st.column_config.CheckboxColumn(
-                                "Inclure dans CSV",
-                                help="Cochez pour inclure cette molécule dans le CSV final",
-                                default=True,
-                            )
-                        },
-                        hide_index=True,
-                        key="results_editor"
-                    )
-                    
-                    # Stocker le DataFrame édité dans la session state
-                    st.session_state.edited_df = edited_df
-                    
-                    # Bouton pour télécharger les molécules sélectionnées
-                    if st.button("Télécharger les molécules sélectionnées", key="download_selected"):
-                        # Récupérer les IDs des molécules sélectionnées
-                        selected_ids = edited_df[edited_df['Selectionner']]['ID'].tolist()
-                        
-                        if selected_ids:
-                            # Filtrer les résultats originaux
-                            download_df = results[results['ID'].isin(selected_ids)]
-                            
-                            # Générer le lien de téléchargement
-                            st.markdown(get_download_link(download_df, "molecules_selectionnees.csv", 
-                                                        "Télécharger les molécules sélectionnées en CSV"), unsafe_allow_html=True)
+                # Utiliser la référence personnalisée
+                if ref_input_type == "ID":
+                    if not ref_id:
+                        st.error("Veuillez entrer un ID de molécule de référence valide.")
+                    else:
+                        ref_data = df[df['ID'] == ref_id]
+                        if len(ref_data) == 0:
+                            st.error(f"La molécule avec l'ID '{ref_id}' n'a pas été trouvée dans le fichier.")
                         else:
-                            st.error("Aucune molécule sélectionnée pour le téléchargement")
+                            st.success(f"Molécule de référence trouvée: {ref_id}")
+                            ref_smiles = ref_data['SMILES'].values[0]
+                else:  # SMILES
+                    if not ref_smiles:
+                        st.error("Veuillez entrer un SMILES de molécule de référence valide.")
+            
+            # Créer la molécule de référence
+            if ref_smiles:
+                ref_mol = mol_from_smiles(ref_smiles)
+                if ref_mol:
+                    # Afficher l'ID ou SMILES de la molécule de référence
+                    if use_default:
+                        display_name = f"{ref_id} (I0)"
+                    else:
+                        display_name = ref_id if ref_input_type == "ID" else "Molécule personnalisée"
                     
-                    # Afficher TOUTES les molécules trouvées
-                    st.markdown("---")
-                    st.subheader("Visualisation de tous les analogues")
+                    st.subheader(f"Molécule de référence: {display_name}")
+                    ref_img = generate_molecule_image(ref_mol, (600, 400), molName=display_name)
+                    if ref_img:
+                        st.image(ref_img, caption=f"SMILES: {ref_smiles}")
                     
-                    # Calculer le nombre de colonnes en fonction du nombre de molécules
-                    num_cols = min(3, len(results))  # Maximum 3 colonnes
+                    # Extraire les fragments avec identification précise
+                    st.subheader("Fragments de la molécule de référence")
+                    fragments = identify_atom_specific_fragments(ref_mol)
                     
-                    # Grouper les molécules par lignes
-                    molecule_rows = []
-                    for i in range(0, len(results), num_cols):
-                        molecule_rows.append(results.iloc[i:i+num_cols])
+                    # Stocker les fragments dans la session state
+                    st.session_state.fragments = fragments
                     
-                    # Afficher chaque groupe de molécules
-                    for idx, row_group in enumerate(molecule_rows):
-                        cols = st.columns(num_cols)
-                        
-                        for i, (_, row) in enumerate(row_group.iterrows()):
-                            if i < len(cols):  # Vérifier que l'index est valide
+                    # Visualisation des fragments disponibles
+                    st.write("### Selectionnez les fragments a MODIFIER")
+                    st.warning("Attention: Sélectionnez uniquement les fragments que vous souhaitez voir varier. Les parties non sélectionnées resteront identiques.")
+                    
+                    # Mise en page en grille
+                    col_count = min(3, len(fragments))
+                    
+                    # Pour chaque fragment, créer une rangée avec l'image et la case à cocher
+                    fragment_rows = []
+                    for i in range(0, len(fragments), col_count):
+                        fragment_rows.append(list(fragments.keys())[i:i+col_count])
+                    
+                    for row in fragment_rows:
+                        cols = st.columns(col_count)
+                        for i, fragment_name in enumerate(row):
+                            if i < len(row):  # Vérifier que l'index est valide
+                                atom_indices = fragments[fragment_name]
                                 with cols[i]:
-                                    mol_idx = idx * num_cols + i + 1
-                                    st.write(f"**{mol_idx}. {row['ID']}**")
-                                    st.write(f"Similarité de Tanimoto (morgan R=3): {row['Similarite']*100:.1f}%")
-                                    
-                                    # Obtenir l'objet molécule
-                                    analog_mol = row['Mol_Obj']
-                                    
-                                    # Générer l'image avec les différences surlignées
-                                    analog_img = generate_molecule_image(
-                                        analog_mol, 
-                                        (300, 250), 
-                                        highlightAtoms=row['Atomes_Modifies_Test'], 
-                                        molName=row['ID']
+                                    # Générer l'image du fragment surligné
+                                    fragment_img = generate_molecule_image(
+                                        ref_mol, 
+                                        (250, 200), 
+                                        highlightAtoms=atom_indices, 
+                                        molName=fragment_name
                                     )
                                     
-                                    if analog_img:
-                                        st.image(analog_img)
+                                    if fragment_img:
+                                        st.image(fragment_img)
                                     
-                                    # Afficher les détails des atomes modifiés
-                                    with st.expander("Voir détails"):
-                                        st.write(f"**Nombre d'atomes modifiés:** {len(row['Atomes_Modifies_Test'])}")
+                                    # Ajouter des informations sur les atomes impliqués (de façon canonique)
+                                    atom_info = get_canonical_atom_description(ref_mol, atom_indices)
+                                    st.write(f"Atomes: {atom_info}")
+                                    
+                                    # Case à cocher pour sélectionner ce fragment
+                                    fragment_selected = st.checkbox(
+                                        fragment_name, 
+                                        value=fragment_name in st.session_state.selected_fragment_names,
+                                        key=f"checkbox_{fragment_name}"
+                                    )
+                                    
+                                    # Mettre à jour la liste des fragments sélectionnés
+                                    if fragment_selected and fragment_name not in st.session_state.selected_fragment_names:
+                                        st.session_state.selected_fragment_names.append(fragment_name)
+                                    elif not fragment_selected and fragment_name in st.session_state.selected_fragment_names:
+                                        st.session_state.selected_fragment_names.remove(fragment_name)
+                    
+                    # Afficher les fragments sélectionnés combinés
+                    if st.session_state.selected_fragment_names:
+                        st.subheader("Zones de modification selectionnees")
+                        
+                        # Récupérer les indices des atomes pour tous les fragments sélectionnés
+                        modification_atoms = []
+                        
+                        for frag_name in st.session_state.selected_fragment_names:
+                            if frag_name in fragments:
+                                frag_atoms = fragments[frag_name]
+                                modification_atoms.extend(frag_atoms)
+                        
+                        # Éliminer les doublons
+                        modification_atoms = list(set(modification_atoms))
+                        
+                        # Stocker les atomes de modification dans la session state
+                        st.session_state.modification_atoms = modification_atoms
+                        
+                        # Créer une visualisation des fragments sélectionnés combinés
+                        combined_img = generate_molecule_image(
+                            ref_mol, 
+                            (600, 400), 
+                            highlightAtoms=modification_atoms, 
+                            molName="Zones de modifications autorisees"
+                        )
+                        
+                        if combined_img:
+                            st.image(combined_img)
+                            
+                        st.write(f"Fragments selectionnes: {', '.join(st.session_state.selected_fragment_names)}")
+                        
+                        # Créer et afficher le scaffold (ce qui ne changera pas)
+                        scaffold_mol, exit_points = extract_scaffold(ref_mol, modification_atoms)
+                        if scaffold_mol:
+                            # Stocker le scaffold dans la session state
+                            st.session_state.scaffold_mol = scaffold_mol
+                            st.session_state.scaffold_exit_points = exit_points
+                            
+                            st.subheader("Partie invariante (scaffold)")
+                            scaffold_img = generate_molecule_image(
+                                scaffold_mol, 
+                                (600, 400), 
+                                highlightAtoms=exit_points,
+                                molName="Scaffold (partie qui restera identique)"
+                            )
+                            if scaffold_img:
+                                st.image(scaffold_img)
+                                scaffold_atom_count = scaffold_mol.GetNumAtoms()
+                                scaffold_smiles = Chem.MolToSmiles(scaffold_mol)
+                                st.info(f"Les points de connexion aux zones de modification sont surlignés en rouge. Le scaffold contient {scaffold_atom_count} atomes.")
+                                st.text(f"SMILES du scaffold: {scaffold_smiles}")
+                    else:
+                        st.info("Selectionnez au moins un fragment a modifier pour commencer l'analyse")
+                    
+                    # Bouton pour rechercher les analogues avec modifications spécifiques
+                    if st.session_state.selected_fragment_names:
+                        search_button = st.button(
+                            "Rechercher les analogues", 
+                            key="search_analogs_button"
+                        )
+                        
+                        if search_button:
+                            # Récupérer les atomes à modifier
+                            modification_atoms = st.session_state.modification_atoms
+                            
+                            st.info(f"Recherche d'analogues où la partie invariante ({ref_mol.GetNumAtoms() - len(modification_atoms)} atomes) reste chimiquement identique...")
+                            
+                            results = find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms, ref_id)
+                            
+                            # Stocker les résultats dans la session state
+                            st.session_state.results = results
+                    
+                    # Si des résultats existent dans la session, les afficher
+                    if 'results' in st.session_state and not st.session_state.results.empty:
+                        results = st.session_state.results
+                        st.success(f"Trouvé {len(results)} analogues avec des modifications uniquement dans les zones sélectionnées")
+                        
+                        # Créer un DataFrame pour l'affichage avec des cases à cocher
+                        display_df = results[['ID', 'SMILES', 'Similarite']].copy()
+                        # Ajouter une colonne de sélection
+                        display_df['Selectionner'] = True
+                        # Convertir la similarité en pourcentage pour une meilleure lisibilité
+                        display_df['Similarite'] = display_df['Similarite'].apply(lambda x: f"{x*100:.1f}%")
+                        
+                        # Afficher le dataframe avec la possibilité de sélectionner des lignes
+                        st.subheader("Analogues identifiés")
+                        st.write("Cochez les molécules que vous souhaitez inclure dans le CSV final")
+                        
+                        # Utiliser st.data_editor pour créer un dataframe modifiable avec cases à cocher
+                        edited_df = st.data_editor(
+                            display_df,
+                            column_config={
+                                "Selectionner": st.column_config.CheckboxColumn(
+                                    "Inclure dans CSV",
+                                    help="Cochez pour inclure cette molécule dans le CSV final",
+                                    default=True,
+                                )
+                            },
+                            hide_index=True,
+                            key="results_editor"
+                        )
+                        
+                        # Stocker le DataFrame édité dans la session state
+                        st.session_state.edited_df = edited_df
+                        
+                        # Bouton pour télécharger les molécules sélectionnées
+                        if st.button("Télécharger les molécules sélectionnées", key="download_selected"):
+                            # Récupérer les IDs des molécules sélectionnées
+                            selected_ids = edited_df[edited_df['Selectionner']]['ID'].tolist()
+                            
+                            if selected_ids:
+                                # Filtrer les résultats originaux
+                                download_df = results[results['ID'].isin(selected_ids)]
+                                
+                                # Générer le lien de téléchargement
+                                st.markdown(get_download_link(download_df, "molecules_selectionnees.csv", 
+                                                            "Télécharger les molécules sélectionnées en CSV"), unsafe_allow_html=True)
+                            else:
+                                st.error("Aucune molécule sélectionnée pour le téléchargement")
+                        
+                        # Afficher TOUTES les molécules trouvées
+                        st.markdown("---")
+                        st.subheader("Visualisation de tous les analogues")
+                        
+                        # Calculer le nombre de colonnes en fonction du nombre de molécules
+                        num_cols = min(3, len(results))  # Maximum 3 colonnes
+                        
+                        # Grouper les molécules par lignes
+                        molecule_rows = []
+                        for i in range(0, len(results), num_cols):
+                            molecule_rows.append(results.iloc[i:i+num_cols])
+                        
+                        # Afficher chaque groupe de molécules
+                        for idx, row_group in enumerate(molecule_rows):
+                            cols = st.columns(num_cols)
+                            
+                            for i, (_, row) in enumerate(row_group.iterrows()):
+                                if i < len(cols):  # Vérifier que l'index est valide
+                                    with cols[i]:
+                                        mol_idx = idx * num_cols + i + 1
+                                        st.write(f"**{mol_idx}. {row['ID']}**")
+                                        st.write(f"Similarité de Tanimoto (morgan R=3): {row['Similarite']*100:.1f}%")
                                         
-                                        # Générer une version moins encombrante du SMILES
-                                        canonical_smiles = Chem.MolToSmiles(analog_mol, isomericSmiles=True)
-                                        st.code(canonical_smiles, language="python")
+                                        # Obtenir l'objet molécule
+                                        analog_mol = row['Mol_Obj']
                                         
-                    # Ajouter une légende pour les visualisations
-                    st.info("""
-                    **Légende**: 
-                    - Les parties surlignées en rouge représentent les modifications par rapport à I0
-                    """)
+                                        # Générer l'image avec les différences surlignées
+                                        analog_img = generate_molecule_image(
+                                            analog_mol, 
+                                            (300, 250), 
+                                            highlightAtoms=row['Atomes_Modifies_Test'], 
+                                            molName=row['ID']
+                                        )
+                                        
+                                        if analog_img:
+                                            st.image(analog_img)
+                                        
+                                        # Afficher les détails des atomes modifiés
+                                        with st.expander("Voir détails"):
+                                            st.write(f"**Nombre d'atomes modifiés:** {len(row['Atomes_Modifies_Test'])}")
+                                            
+                                            # Générer une version moins encombrante du SMILES
+                                            canonical_smiles = Chem.MolToSmiles(analog_mol, isomericSmiles=True)
+                                            st.code(canonical_smiles, language="python")
+                                            
+                        # Ajouter une légende pour les visualisations
+                        st.info("""
+                        **Légende**: 
+                        - Les parties surlignées en rouge représentent les modifications par rapport à la molécule de référence
+                        """)
+                else:
+                    st.error("SMILES invalide pour la molécule de référence.")
+            else:
+                st.error("Impossible de trouver ou de définir une molécule de référence valide.")
 
     except Exception as e:
         st.error(f"Une erreur s'est produite lors du traitement du fichier: {str(e)}")
@@ -1027,10 +1089,18 @@ else:
     st.info("""
     ## Comment utiliser cet outil
     
-    1. **Chargez votre fichier CSV/TSV** contenant les molécules à analyser (doit contenir les colonnes 'SMILES' et 'ID')
-    2. **Sélectionnez les fragments à MODIFIER** - toutes les parties non sélectionnées resteront identiques
-    3. **Examinez le scaffold** qui montre la partie qui restera identique dans tous les analogues
-    4. **Recherchez les analogues** qui ont exactement le même scaffold avec des modifications uniquement aux endroits sélectionnés
+    1. **Choisissez votre molécule de référence**:
+       - Utilisez I0 (par défaut)
+       - Ou spécifiez une autre molécule par ID ou SMILES
+    
+    2. **Chargez votre fichier CSV/TSV** contenant les molécules à analyser (doit contenir les colonnes 'SMILES' et 'ID')
+    
+    3. **Sélectionnez les fragments à MODIFIER** - toutes les parties non sélectionnées resteront identiques
+    
+    4. **Examinez le scaffold** qui montre la partie qui restera identique dans tous les analogues
+    
+    5. **Recherchez les analogues** qui ont exactement le même scaffold avec des modifications uniquement aux endroits sélectionnés
+    
     6. **Téléchargez les résultats** au format CSV
     
     ### Principe de fonctionnement
