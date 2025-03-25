@@ -129,12 +129,18 @@ def identify_cycles(mol):
     return cycle_atoms
 
 def identify_functional_groups(mol):
-    """Identifie les groupes fonctionnels communs dans une molecule"""
+    """Identifie les groupes fonctionnels communs dans une molecule sans inclure les atomes des cycles"""
     if mol is None:
         return {}
     
     # S'assurer que la molécule est sanitizée
     mol = sanitize_mol(mol)
+    
+    # Identifier d'abord les atomes des cycles pour pouvoir les exclure
+    ring_info = mol.GetRingInfo()
+    ring_atoms = set()
+    for ring in ring_info.AtomRings():
+        ring_atoms.update(ring)
     
     # Definir des SMARTS pour des groupes fonctionnels communs
     functional_groups = {
@@ -161,12 +167,16 @@ def identify_functional_groups(mol):
                 if matches:
                     # Pour chaque occurrence, créer une entrée séparée
                     for i, match in enumerate(matches):
-                        group_atoms[f"{name} {i+1}"] = list(match)
+                        # Filtrer pour exclure les atomes qui font partie d'un cycle
+                        non_ring_atoms = [idx for idx in match if idx not in ring_atoms]
+                        
+                        # Ne conserver le groupe que s'il contient des atomes hors cycle
+                        if non_ring_atoms:
+                            group_atoms[f"{name} {i+1}"] = non_ring_atoms
         except Exception as e:
             continue  # Ignorer les erreurs spécifiques à certains motifs
     
     return group_atoms
-
 def identify_atom_specific_fragments(mol):
     """Identifie des fragments dans la molecule basés sur des caractéristiques structurelles"""
     if mol is None:
@@ -181,10 +191,7 @@ def identify_atom_specific_fragments(mol):
     cycles = identify_cycles(mol)
     fragments.update(cycles)
     
-    # 2. Identifier les groupes fonctionnels de manière spécifique
-    func_groups = identify_functional_groups(mol)
-    
-    # Ajouter des informations sur la position de chaque groupe fonctionnel
+    # Créer un ensemble de tous les atomes de cycle pour référence rapide
     cycle_atoms_flat = []
     for atoms in cycles.values():
         cycle_atoms_flat.extend(atoms)
@@ -199,23 +206,40 @@ def identify_atom_specific_fragments(mol):
             else:
                 atom_to_cycles[atom_idx] = [cycle_name]
     
+    # 2. Identifier les groupes fonctionnels de manière spécifique
+    func_groups = identify_functional_groups(mol)
+    
     # Pour chaque groupe fonctionnel, vérifier sa position par rapport aux cycles
+    # et créer un nouveau nom qui inclut cette information
+    func_groups_positioned = {}
+    
     for group_name, atoms in func_groups.items():
-        position_info = ""
+        # Trouver les points de connexion aux cycles
+        connection_to_cycle = False
+        cycle_connection_info = ""
+        
         for atom_idx in atoms:
-            if atom_idx in atom_to_cycles:
-                cycle_names = atom_to_cycles[atom_idx]
-                if len(cycle_names) == 1:
-                    position_info = f" sur {cycle_names[0]}"
-                else:
-                    position_info = f" a l'intersection {'+'.join(cycle_names)}"
+            atom = mol.GetAtomWithIdx(atom_idx)
+            for neighbor in atom.GetNeighbors():
+                neighbor_idx = neighbor.GetIdx()
+                if neighbor_idx in cycle_atoms_set and neighbor_idx not in atoms:
+                    connection_to_cycle = True
+                    if neighbor_idx in atom_to_cycles:
+                        cycle_names = atom_to_cycles[neighbor_idx]
+                        if len(cycle_names) == 1:
+                            cycle_connection_info = f" sur {cycle_names[0]}"
+                        else:
+                            cycle_connection_info = f" a l'intersection {'+'.join(cycle_names)}"
+                    break
+            if connection_to_cycle:
                 break
         
-        # Si au moins un atome est dans un cycle, mettre à jour le nom
-        if position_info:
-            fragments[f"{group_name}{position_info}"] = atoms
-        else:
-            fragments[group_name] = atoms
+        # Ajouter l'information de position au nom du groupe
+        new_group_name = f"{group_name}{cycle_connection_info}"
+        func_groups_positioned[new_group_name] = atoms
+    
+    # Ajouter les groupes fonctionnels avec informations de position
+    fragments.update(func_groups_positioned)
     
     # 3. Identifier les substituants (chaînes latérales)
     # Trouver les atomes de connexion (atomes cycliques avec voisins non cycliques)
@@ -235,6 +259,9 @@ def identify_atom_specific_fragments(mol):
     substituent_idx = 1
     processed = set()
     
+    # Ensemble pour détecter les doublons de liaisons
+    unique_connections = set()
+    
     for atom_idx, neighbors in connection_points.items():
         position_info = ""
         if atom_idx in atom_to_cycles:
@@ -248,8 +275,18 @@ def identify_atom_specific_fragments(mol):
             if start_idx in processed:
                 continue
             
+            # Créer une clé canonique pour cette connexion (toujours ordonner les indices)
+            connection_key = tuple(sorted([atom_idx, start_idx]))
+            
+            # Vérifier si cette connexion a déjà été traitée
+            if connection_key in unique_connections:
+                continue
+            
+            # Marquer cette connexion comme traitée
+            unique_connections.add(connection_key)
+            
             # Explorer la chaîne à partir de ce point de départ
-            chain_atoms = [start_idx]
+            chain_atoms = [start_idx]  # Ne pas inclure l'atome du cycle
             to_process = [start_idx]
             processed.add(start_idx)
             
@@ -263,12 +300,12 @@ def identify_atom_specific_fragments(mol):
                         processed.add(n_idx)
                         to_process.append(n_idx)
             
-            # Ajouter la chaîne trouvée avec son point d'attache
-            all_atoms = [atom_idx] + chain_atoms
-            fragments[f"Chaine {substituent_idx}{position_info}"] = all_atoms
+            # Ajouter la chaîne trouvée sans inclure l'atome du cycle dans la liste des atomes
+            fragments[f"Chaine {substituent_idx}{position_info}"] = chain_atoms
             substituent_idx += 1
     
     return fragments
+
 
 def extract_scaffold(mol, modification_atoms):
     """
@@ -699,7 +736,7 @@ def find_analogs_by_fixed_scaffold(df, ref_mol, modification_atoms):
     return results_df
 
 # Interface utilisateur
-st.title("Recherche Analogues Ciblés ")
+st.title("Recherche analogues ciblés")
 
 # Upload du fichier
 uploaded_file = st.file_uploader("Charger le fichier CSV/TSV de molecules", type=["csv", "tsv"])
