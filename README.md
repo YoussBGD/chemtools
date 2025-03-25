@@ -4,7 +4,7 @@ Ce dépôt contient deux outils complémentaires pour l'analyse et la comparaiso
 
 ## Description des outils
 
-### 1. Analyseur de modifications moléculaires (recherche analogues) (`find_modif.py`)
+### 1. Recherche analogues ciblés (`find_modif.py`)
 
 Cet outil permet d'identifier des analogues moléculaires dans lesquels une structure centrale (scaffold) reste chimiquement identique tandis que des fragments spécifiques varient.
 
@@ -14,7 +14,7 @@ Cet outil permet d'identifier des analogues moléculaires dans lesquels une stru
 - Visualisation des modifications par rapport à la molécule de référence
 - Export des résultats au format CSV avec toutes les données originales
 
-### 2. Comparaison avancée avec la moélcule référence I0(`comp_I0_V2.py`)
+### 2. Comparaison avec la moélcule référence I0(`comp_I0_V2.py`)
 
 Cet outil permet de comparer visuellement une molécule de référence (I0) avec d'autres molécules analogues et d'identifier leurs similitudes et différences structurelles.
 
