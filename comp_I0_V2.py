@@ -11,7 +11,7 @@ from io import BytesIO
 import base64
 import random
 
-st.set_page_config(page_title="Comparaison de molécules avec I0", layout="wide")
+st.set_page_config(page_title="Comparaison avec I0", layout="wide")
 
 @st.cache_data
 def load_data(file):
@@ -395,7 +395,7 @@ def create_download_link(df, filename):
     return href
 
 # Interface utilisateur
-st.title("Comparaison avancée avec I0")
+st.title("Comparaison avec I0")
 
 st.sidebar.header("Options")
 image_width = st.sidebar.slider("Largeur d'image", 600, 1200, 800, key="image_width_slider")
