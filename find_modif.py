@@ -8,7 +8,7 @@ from PIL import Image
 import io
 import base64
 
-st.set_page_config(page_title="Analyseur de modifications moleculaires", layout="wide")
+st.set_page_config(page_title="Recherche analogues ciblés", layout="wide")
 
 # Configuration pour maintenir l'état entre les actions
 if 'initialized' not in st.session_state:
