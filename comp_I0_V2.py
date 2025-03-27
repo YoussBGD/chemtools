@@ -11,7 +11,7 @@ from io import BytesIO
 import base64
 import random
 
-st.set_page_config(page_title="Comparaison avec I0", layout="wide")
+st.set_page_config(page_title="Comparaison avancée de molécules", layout="wide")
 
 @st.cache_data
 def load_data(file):
@@ -395,7 +395,7 @@ def create_download_link(df, filename):
     return href
 
 # Interface utilisateur
-st.title("Comparaison avec I0")
+st.title("Comparaison avancée de molécules")
 
 st.sidebar.header("Options")
 image_width = st.sidebar.slider("Largeur d'image", 600, 1200, 800, key="image_width_slider")
@@ -418,6 +418,10 @@ if 'selected_molecules' not in st.session_state:
     st.session_state.selected_molecules = set()
 if 'similar_molecules_index' not in st.session_state:
     st.session_state.similar_molecules_index = 0
+if 'reference_molecule_id' not in st.session_state:
+    st.session_state.reference_molecule_id = None
+if 'reference_molecule_smiles' not in st.session_state:
+    st.session_state.reference_molecule_smiles = None
 
 # Upload du fichier
 uploaded_file = st.file_uploader("Charger le fichier CSV de molécules", type=["csv"])
@@ -435,96 +439,147 @@ if uploaded_file is not None:
         else:
             st.success(f"Fichier chargé avec succès! {len(df)} molécules trouvées.")
             
-            # Rechercher I0 dans le fichier
-            i0_id = "Molport-001-492-296"
-            i0_data = df[df['ID'] == i0_id]
+            # Section pour définir la molécule de référence
+            st.subheader("Définition de la molécule de référence")
             
-            if len(i0_data) == 0:
-                st.error(f"La molécule de référence I0 (ID: {i0_id}) n'a pas été trouvée dans le fichier.")
-                # Option pour entrer manuellement le SMILES de I0
-                i0_smiles = st.text_input("Entrez manuellement le SMILES de la molécule I0:", key="i0_smiles_input")
-                if i0_smiles:
-                    i0_mol = mol_from_smiles(i0_smiles)
-                    if i0_mol:
-                        st.success("Molécule I0 définie manuellement.")
-                    else:
-                        st.error("SMILES invalide pour I0.")
-                        i0_mol = None
-                else:
-                    i0_mol = None
-            else:
-                st.success(f"Molécule de référence I0 trouvée: {i0_id}")
-                i0_smiles = i0_data['SMILES'].values[0]
-                i0_mol = mol_from_smiles(i0_smiles)
+            reference_selection_method = st.radio(
+                "Comment souhaitez-vous définir la molécule de référence?",
+                ["Sélectionner dans le fichier", "Entrer manuellement le SMILES"],
+                key="reference_selection_method"
+            )
+            
+            ref_mol = None
+            reference_id = None
+            reference_smiles = None
+            
+            if reference_selection_method == "Sélectionner dans le fichier":
+                # Liste déroulante pour sélectionner une molécule de référence parmi le fichier
+                all_ids = df['ID'].tolist()
                 
-                if i0_mol:
-                    # Afficher I0 seule
-                    st.subheader("Molécule de référence I0")
-                    i0_img = generate_molecule_image(i0_mol, (image_width//2, image_height//2), f"I0: {i0_id}")
-                    if i0_img:
-                        st.image(i0_img, caption=f"I0: {i0_smiles}")
+                # Suggestion par défaut: chercher I0 d'abord
+                default_i0_id = "Molport-001-492-296"
+                default_index = 0
+                if default_i0_id in all_ids:
+                    default_index = all_ids.index(default_i0_id)
+                
+                reference_id = st.selectbox(
+                    "Sélectionner une molécule de référence:",
+                    options=all_ids,
+                    index=default_index,
+                    key="reference_selection_dropdown"
+                )
+                
+                if reference_id:
+                    reference_data = df[df['ID'] == reference_id]
+                    if not reference_data.empty:
+                        reference_smiles = reference_data['SMILES'].values[0]
+                        ref_mol = mol_from_smiles(reference_smiles)
+                        if ref_mol:
+                            st.success(f"Molécule de référence sélectionnée: {reference_id}")
+                            # Stocker dans la session
+                            st.session_state.reference_molecule_id = reference_id
+                            st.session_state.reference_molecule_smiles = reference_smiles
+                        else:
+                            st.error(f"Erreur lors de la conversion du SMILES pour la molécule {reference_id}")
+            else:
+                # Option pour entrer manuellement le SMILES
+                reference_smiles = st.text_input(
+                    "Entrez le SMILES de la molécule de référence:",
+                    key="reference_smiles_input",
+                    value=st.session_state.reference_molecule_smiles or ""
+                )
+                
+                reference_id = st.text_input(
+                    "Nom/Identifiant de la molécule de référence (optionnel):",
+                    key="reference_id_input",
+                    value=st.session_state.reference_molecule_id or "Référence"
+                )
+                
+                if reference_smiles:
+                    ref_mol = mol_from_smiles(reference_smiles)
+                    if ref_mol:
+                        st.success("Molécule de référence définie manuellement.")
+                        # Stocker dans la session
+                        st.session_state.reference_molecule_id = reference_id
+                        st.session_state.reference_molecule_smiles = reference_smiles
+                    else:
+                        st.error("SMILES invalide pour la molécule de référence.")
+            
+            # Continuer uniquement si une molécule de référence valide est définie
+            if ref_mol:
+                # Afficher la molécule de référence seule
+                st.subheader(f"Molécule de référence: {reference_id}")
+                ref_img = generate_molecule_image(ref_mol, (image_width//2, image_height//2), f"{reference_id}")
+                if ref_img:
+                    st.image(ref_img, caption=f"SMILES: {reference_smiles}")
+                
+                # Préparer la navigation
+                # Si la référence vient du fichier, on l'exclut
+                if reference_id in df['ID'].values:
+                    df_without_ref = df[df['ID'] != reference_id].reset_index(drop=True)
+                else:
+                    df_without_ref = df.reset_index(drop=True)
+                
+                total_mols = len(df_without_ref)
+                
+                # Fonctions pour les boutons de navigation
+                def next_molecule():
+                    st.session_state.current_index = (st.session_state.current_index + 1) % total_mols
+                    # Réinitialiser les transformations
+                    st.session_state.rotation_angle = 0
+                    st.session_state.flip_h = False
+                    st.session_state.flip_v = False
+                    # Réinitialiser l'index des molécules similaires
+                    st.session_state.similar_molecules_index = 0
+                
+                def prev_molecule():
+                    st.session_state.current_index = (st.session_state.current_index - 1) % total_mols
+                    # Réinitialiser les transformations
+                    st.session_state.rotation_angle = 0
+                    st.session_state.flip_h = False
+                    st.session_state.flip_v = False
+                    # Réinitialiser l'index des molécules similaires
+                    st.session_state.similar_molecules_index = 0
+                
+                def jump_to_molecule(index):
+                    st.session_state.current_index = index
+                    # Réinitialiser les transformations
+                    st.session_state.rotation_angle = 0
+                    st.session_state.flip_h = False
+                    st.session_state.flip_v = False
+                    # Réinitialiser l'index des molécules similaires
+                    st.session_state.similar_molecules_index = 0
                     
-                    # Préparer la navigation
-                    df_without_i0 = df[df['ID'] != i0_id].reset_index(drop=True)
-                    total_mols = len(df_without_i0)
+                def jump_to_first():
+                    jump_to_molecule(0)
                     
-                    # Fonctions pour les boutons de navigation
-                    def next_molecule():
-                        st.session_state.current_index = (st.session_state.current_index + 1) % total_mols
-                        # Réinitialiser les transformations
-                        st.session_state.rotation_angle = 0
-                        st.session_state.flip_h = False
-                        st.session_state.flip_v = False
-                        # Réinitialiser l'index des molécules similaires
+                def jump_to_last():
+                    jump_to_molecule(total_mols - 1)
+                
+                # Assurer que l'index actuel est valide
+                st.session_state.current_index = max(0, min(st.session_state.current_index, total_mols - 1))
+                
+                # Section pour les molécules sélectionnées
+                st.sidebar.subheader("Molécules sélectionnées")
+                st.sidebar.write(f"Nombre de molécules sélectionnées: {len(st.session_state.selected_molecules)}")
+                
+                if len(st.session_state.selected_molecules) > 0:
+                    # Créer un DataFrame avec les molécules sélectionnées
+                    selected_df = df[df['ID'].isin(st.session_state.selected_molecules)]
+                    
+                    # Créer un lien de téléchargement
+                    download_link = create_download_link(selected_df, "molecules_selectionnees.csv")
+                    st.sidebar.markdown(download_link, unsafe_allow_html=True)
+                    
+                    # Option pour effacer la sélection
+                    if st.sidebar.button("Effacer la sélection", key="clear_selection_button"):
+                        st.session_state.selected_molecules = set()
                         st.session_state.similar_molecules_index = 0
-                    
-                    def prev_molecule():
-                        st.session_state.current_index = (st.session_state.current_index - 1) % total_mols
-                        # Réinitialiser les transformations
-                        st.session_state.rotation_angle = 0
-                        st.session_state.flip_h = False
-                        st.session_state.flip_v = False
-                        # Réinitialiser l'index des molécules similaires
-                        st.session_state.similar_molecules_index = 0
-                    
-                    def jump_to_molecule(index):
-                        st.session_state.current_index = index
-                        # Réinitialiser les transformations
-                        st.session_state.rotation_angle = 0
-                        st.session_state.flip_h = False
-                        st.session_state.flip_v = False
-                        # Réinitialiser l'index des molécules similaires
-                        st.session_state.similar_molecules_index = 0
-                        
-                    def jump_to_first():
-                        jump_to_molecule(0)
-                        
-                    def jump_to_last():
-                        jump_to_molecule(total_mols - 1)
-                    
-                    # Assurer que l'index actuel est valide
-                    st.session_state.current_index = max(0, min(st.session_state.current_index, total_mols - 1))
-                    
-                    # Section pour les molécules sélectionnées
-                    st.sidebar.subheader("Molécules sélectionnées")
-                    st.sidebar.write(f"Nombre de molécules sélectionnées: {len(st.session_state.selected_molecules)}")
-                    
-                    if len(st.session_state.selected_molecules) > 0:
-                        # Créer un DataFrame avec les molécules sélectionnées
-                        selected_df = df[df['ID'].isin(st.session_state.selected_molecules)]
-                        
-                        # Créer un lien de téléchargement
-                        download_link = create_download_link(selected_df, "molecules_selectionnees.csv")
-                        st.sidebar.markdown(download_link, unsafe_allow_html=True)
-                        
-                        # Option pour effacer la sélection
-                        if st.sidebar.button("Effacer la sélection", key="clear_selection_button"):
-                            st.session_state.selected_molecules = set()
-                            st.session_state.similar_molecules_index = 0
-                            st.rerun()
-                    
-                    # Obtenir la molécule actuelle
-                    current_mol = df_without_i0.iloc[st.session_state.current_index]
+                        st.rerun()
+                
+                # Obtenir la molécule actuelle
+                if total_mols > 0:
+                    current_mol = df_without_ref.iloc[st.session_state.current_index]
                     current_id = current_mol['ID']
                     
                     # Créer l'objet mol pour la molécule sélectionnée
@@ -577,7 +632,7 @@ if uploaded_file is not None:
                         
                         with search_cols[0]:
                             # Liste déroulante avec recherche pour les IDs
-                            all_ids = df_without_i0['ID'].tolist()
+                            all_ids = df_without_ref['ID'].tolist()
                             selected_id = st.selectbox(
                                 "Rechercher un ID:",
                                 options=all_ids,
@@ -589,7 +644,7 @@ if uploaded_file is not None:
                             if st.button("🔎 Rechercher", key="search_id_button", use_container_width=True):
                                 # Trouver l'index de la molécule avec cet ID
                                 try:
-                                    target_idx = df_without_i0[df_without_i0['ID'] == selected_id].index[0]
+                                    target_idx = df_without_ref[df_without_ref['ID'] == selected_id].index[0]
                                     jump_to_molecule(target_idx)
                                     st.rerun()
                                 except IndexError:
@@ -666,11 +721,11 @@ if uploaded_file is not None:
                         
                         # D'abord l'alignement automatique si activé
                         if st.session_state.auto_align:
-                            mol = align_mol_to_ref(i0_mol, mol)
+                            mol = align_mol_to_ref(ref_mol, mol)
                             
                         # Ensuite optimiser les liaisons rotatives si activé
                         if st.session_state.optimize_rotatable_bonds:
-                            mol = optimize_rotatable_bonds(i0_mol, mol)
+                            mol = optimize_rotatable_bonds(ref_mol, mol)
                         
                         # Puis les transformations manuelles
                         if st.session_state.rotation_angle != 0:
@@ -682,19 +737,19 @@ if uploaded_file is not None:
                         if st.session_state.flip_v:
                             mol = flip_molecule_vertical(mol)
                         
-                        # Afficher d'abord la comparaison avec I0
-                        st.subheader("Comparaison avec I0")
+                        # Afficher d'abord la comparaison avec la molécule de référence
+                        st.subheader(f"Comparaison avec {reference_id}")
                         st.markdown("""
                         Visualisation côte à côte avec les différences mises en évidence:
-                        - **Rouge**: Parties présentes uniquement dans I0
+                        - **Rouge**: Parties présentes uniquement dans la molécule de référence
                         - **Vert**: Parties présentes uniquement dans la molécule comparée
                         - **Noir**: Structure commune aux deux molécules
                         """)
                         
                         highlight_img = generate_difference_highlight_image(
-                            i0_mol, 
+                            ref_mol, 
                             mol,
-                            i0_id,
+                            reference_id,
                             current_id,
                             (image_width, image_height)
                         )
@@ -707,7 +762,7 @@ if uploaded_file is not None:
                         # Informations sur les liaisons rotatives
                         rot_bonds = find_rotatable_bonds(mol)
                         if rot_bonds and st.session_state.optimize_rotatable_bonds:
-                            st.info(f"Cette molécule possède {len(rot_bonds)} liaisons rotatives qui ont été optimisées automatiquement pour une meilleure superposition avec I0.")
+                            st.info(f"Cette molécule possède {len(rot_bonds)} liaisons rotatives qui ont été optimisées automatiquement pour une meilleure superposition avec la molécule de référence.")
                         
                         # Trouver des molécules similaires parmi celles déjà sélectionnées
                         similar_molecules = []
@@ -800,7 +855,9 @@ if uploaded_file is not None:
                     else:
                         st.error(f"Impossible de traiter la molécule: {current_id}")
                 else:
-                    st.error("Impossible de traiter la molécule I0.")
+                    st.warning("Aucune molécule à comparer dans le fichier.")
+            else:
+                st.error("Impossible de traiter la molécule de référence.")
     except Exception as e:
         st.error(f"Une erreur s'est produite lors du traitement du fichier: {str(e)}")
 else:
@@ -811,8 +868,6 @@ else:
     Le fichier CSV doit contenir au minimum les colonnes suivantes:
     - `SMILES`: Notation SMILES des molécules
     - `ID`: Identifiant unique de chaque molécule
-    
-    La molécule de référence I0 doit avoir l'ID `Molport-001-492-296`.
     """)
     
     # Afficher un exemple d'utilisation
@@ -820,8 +875,11 @@ else:
     ### Comment utiliser cet outil
     
     1. **Chargez votre fichier CSV** contenant les molécules à comparer
-    2. **Naviguez** entre les molécules avec les boutons de navigation
-    3. **Sélectionnez** les molécules intéressantes
+    2. **Définissez une molécule de référence** de deux façons possibles :
+       - En la sélectionnant dans votre fichier CSV
+       - En entrant manuellement son SMILES et un identifiant
+    3. **Naviguez** entre les molécules avec les boutons de navigation
+    4. **Sélectionnez** les molécules intéressantes
     
     #### Nouvelles fonctionnalités de navigation
     
@@ -834,10 +892,10 @@ else:
     #### Fonctionnalité de comparaison avec molécules similaires
     
     Pour chaque nouvelle molécule, l'outil affiche automatiquement:
-    1. Une comparaison avec I0 (en haut)
+    1. Une comparaison avec la molécule de référence (en haut)
     2. Une comparaison avec les molécules similaires déjà sélectionnées (en bas)
     
     Vous pouvez naviguer entre les molécules similaires déjà sélectionnées grâce aux boutons "Similaire précédente" et "Similaire suivante".
     
-    Cette fonctionnalité vous permet d'identifier rapidement si la molécule actuelle ressemble à des molécules que vous avez déjà sélectionnées.
+    Cette fonctionnalité vous permet d'identifier rapidement si la molécule actuelle ressemble beaucoup à des molécules que vous avez déjà sélectionnées.
     """)
